@@ -24,17 +24,23 @@ void cuda_check(cudaError_t code, const char *file, int line) {
         cuda_check((x), __FILE__, __LINE__); \
     } while (0)
 
-__device__ __forceinline__ void cp_async4(void *smem_ptr, const void *glob_ptr) {
+__device__ inline void cp_async4(void *smem_ptr, const void *glob_ptr) {
     const int BYTES = 16;
     uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
     asm volatile(
-        "cp.async.cg.shared.global [%0], [%1], %2;" ::"r"(smem),
+        "{\n"
+        "   cp.async.cg.shared.global [%0], [%1], %2;\n"
+        "}\n" ::"r"(smem),
         "l"(glob_ptr),
         "n"(BYTES));
 }
 
-__device__ __forceinline__ void async_memcpy_waitall() {
-    asm volatile("cp.async.wait_all;\n" ::);
+__device__ __forceinline__ void async_commit_group() {
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+
+template <int N> __device__ __forceinline__ void async_wait_pending() {
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -253,6 +259,10 @@ void run_config(
         CUDA_CHECK(cudaMemset(workspace_gpu, 0, workspace_size));
     }
 
+    void *flush_gpu = nullptr;
+    CUDA_CHECK(cudaMalloc(&flush_gpu, 1024*1024*64));
+    CUDA_CHECK(cudaMemset(flush_gpu, 1, 1024*1024*64));
+
     if (phase == Phase::BENCHMARK) {
         printf("  %6d  %6d  %6d", size_i, size_j, size_k);
     } else {
@@ -272,6 +282,9 @@ void run_config(
     double ref_mean_square = 0.0;
     for (int32_t i = 0; i < size_i; ++i) {
         for (int32_t j = 0; j < size_j; ++j) {
+            if (size_i == 1024 && j == 0 && i == 0) {
+                std::cout << c_out_host[i * size_j + j] << " " << c[i * size_j + j] << std::endl;
+            }
             float diff = c_out_host[i * size_j + j] - c[i * size_j + j];
             mse += diff * diff;
             ref_mean_square += c[i * size_j + j] * c[i * size_j + j];
@@ -294,11 +307,12 @@ void run_config(
         double target_time_ms = 200.0;
         double elapsed_ms = benchmark_ms(
             target_time_ms,
-            4,
+            1,
             [&]() {
                 if (workspace_size > 0) {
                     CUDA_CHECK(cudaMemset(workspace_gpu, 0, workspace_size));
                 }
+                CUDA_CHECK(cudaMemset(flush_gpu, 1, 1024*1024*64));
             },
             [&]() {
                 Impl::run(size_i, size_j, size_k, a_gpu, b_gpu, c_gpu, workspace_gpu);
@@ -320,6 +334,7 @@ void run_config(
     if (workspace_size > 0) {
         CUDA_CHECK(cudaFree(workspace_gpu));
     }
+    CUDA_CHECK(cudaFree(flush_gpu));
 }
 
 template <typename Impl>
@@ -410,13 +425,15 @@ BenchmarkResults get_cublas_fma_results() {
     return BenchmarkResults{
         "cublas_fma",
         {
-            {{3072, 3072, 3072}, 4.05},
-            {{512, 3072, 3072}, 0.80},
-            {{256, 3072, 3072}, 0.46},
-            {{128, 3072, 3072}, 0.24},
-            {{64, 3072, 3072}, 0.13},
-            {{32, 3072, 3072}, 0.11},
-            {{16, 3072, 3072}, 0.11},
+            {{3072, 3072, 3072}, 3.152},
+            {{2048, 3072, 3072}, 2.174},
+            {{1024, 3072, 3072}, 1.090},
+            {{512, 3072, 3072}, 0.559},
+            {{256, 3072, 3072}, 0.356},
+            {{128, 3072, 3072}, 0.256},
+            {{64, 3072, 3072}, 0.194},
+            {{32, 3072, 3072}, 0.181},
+            {{16, 3072, 3072}, 0.181},
         }};
 }
 
@@ -492,12 +509,12 @@ void print_speedup(
 
 int main(int argc, char **argv) {
     std::string test_data_dir = ".";
-    if (char *c_str_test_data_dir = std::getenv("MATMUL_TEST_DATA_DIR_2")) {
-        test_data_dir = c_str_test_data_dir;
-    }
+
 
     auto configs = std::vector<BenchmarkConfig>{
         {3072, 3072, 3072},
+        {2048, 3072, 3072},
+        {1024, 3072, 3072},
         {512, 3072, 3072},
         {256, 3072, 3072},
         {128, 3072, 3072},

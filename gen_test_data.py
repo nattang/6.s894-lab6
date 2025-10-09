@@ -11,7 +11,7 @@ script_dir = os.path.dirname(os.path.realpath(__file__))
 
 sizes = []
 
-for size_i in [16, 32, 64, 128, 256, 512, 3072]:
+for size_i in [16, 32, 64, 128, 256, 512, 1024, 2048, 3072]:
     sizes.append((size_i, 3072, 3072))
 
 with open(os.path.join(script_dir, "sizes.json"), "w") as f:
