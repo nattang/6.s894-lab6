@@ -282,9 +282,6 @@ void run_config(
     double ref_mean_square = 0.0;
     for (int32_t i = 0; i < size_i; ++i) {
         for (int32_t j = 0; j < size_j; ++j) {
-            if (size_i == 1024 && j == 0 && i == 0) {
-                std::cout << c_out_host[i * size_j + j] << " " << c[i * size_j + j] << std::endl;
-            }
             float diff = c_out_host[i * size_j + j] - c[i * size_j + j];
             mse += diff * diff;
             ref_mean_square += c[i * size_j + j] * c[i * size_j + j];
