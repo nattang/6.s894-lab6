@@ -98,7 +98,7 @@ __device__ inline void cp_async4(void *smem_ptr, const void *glob_ptr) {
 #define MICRO_TILE_J 8
 
 #define TILE_K_PAD (TILE_K + 4)
-#define TILE_J_PAD (TILE_J + 36)
+#define TILE_J_PAD (TILE_J + 4)
 
 #define A_SHMEM_COLS_PER_THREAD (TILE_K / BLOCK_DIM_X) // 1
 #define A_SHMEM_COLS_PER_THREAD_IMP (TILE_K / (TILE_J / MICRO_TILE))
@@ -344,7 +344,7 @@ __global__ void matmul_tensor_main(
     int warp_id = threadIdx.y;
 
     extern __shared__ __align__(16) float shared[];
-    float *A_shared = shared;                     // [TILE_I][TILE_K]: untranspose
+    float *A_shared = shared;                         // [TILE_I][TILE_K]: untranspose
     float *B_shared = A_shared + TILE_I * TILE_K_PAD; // [TILE_K][TILE_J]
 
     int k_per_split = CEIL_DIV(size_k, split_k);
@@ -429,12 +429,14 @@ __global__ void matmul_tensor_main(
                     a_reg[mrow][mcol][0] = __float_as_uint(
                         A_shared[(a_subtile_base) + (a1_row * TILE_K_PAD) + a1_col]);
                     a_reg[mrow][mcol][1] = __float_as_uint(
-                        A_shared[(a_subtile_base) + ((a1_row + 8) * TILE_K_PAD) + a1_col]);
+                        A_shared
+                            [(a_subtile_base) + ((a1_row + 8) * TILE_K_PAD) + a1_col]);
                     a_reg[mrow][mcol][2] = __float_as_uint(
                         A_shared[(a_subtile_base) + (a1_row * TILE_K_PAD) + a1_col + 4]);
                     a_reg[mrow][mcol][3] = __float_as_uint(
                         A_shared
-                            [(a_subtile_base) + ((a1_row + 8) * TILE_K_PAD) + a1_col + 4]);
+                            [(a_subtile_base) + ((a1_row + 8) * TILE_K_PAD) + a1_col +
+                             4]);
 
                     int b1_col = lane_id / 4;
                     int b1_row = lane_id % 4;
@@ -443,11 +445,11 @@ __global__ void matmul_tensor_main(
                     int b_subtile_col = warp_col_base + (mcol * 8); // 8 cols per subtile
                     int b_subtile_base = (b_subtile_row * TILE_J_PAD) + b_subtile_col;
 
-
                     b_reg[mrow][mcol][0] = __float_as_uint(
                         B_shared[(b_subtile_base) + (b1_row * TILE_J_PAD) + b1_col]);
                     b_reg[mrow][mcol][1] = __float_as_uint(
-                        B_shared[(b_subtile_base) + ((b1_row + 4) * TILE_J_PAD) + b1_col]);
+                        B_shared
+                            [(b_subtile_base) + ((b1_row + 4) * TILE_J_PAD) + b1_col]);
                 }
             }
 
@@ -547,7 +549,8 @@ void launch_matmul_tensor(
             c);
 
     } else if (size_i >= 128) {
-        dim3 gridDimMain = dim3(CEIL_DIV(size_j, TILE_J), CEIL_DIV(size_i, TILE_I), split_k);
+        dim3 gridDimMain =
+            dim3(CEIL_DIV(size_j, TILE_J), CEIL_DIV(size_i, TILE_I), split_k);
         dim3 blockDimMain = dim3(BLOCK_DIM_X, BLOCK_DIM_Y);
 
         uint32_t shmem_size_bytes =
@@ -574,7 +577,6 @@ void launch_matmul_tensor(
             split_k,
             (float *)workspace,
             c);
-        
 
     } else {
         dim3 gridDimMain =
@@ -968,15 +970,17 @@ void write_json_results(
     }
     file << "}\n";
 }
-
+float fraction_achieved[] =
+    {0.589f, 0.579f, 0.559f, 0.538f, 0.447f, 0.576f, 0.428f, 0.427f, 0.428f};
 void print_speedup(
     std::vector<BenchmarkConfig> const &configs,
     BenchmarkResults const &first,
     BenchmarkResults const &second) {
     printf("\nspeedups %s -> %s:\n\n", first.name, second.name);
-    printf("  %-6s  %-6s  %-6s  %-7s\n", "size_i", "size_j", "size_k", "speedup");
-    printf("  %-6s  %-6s  %-6s  %-7s\n", "------", "------", "------", "-------");
-    for (auto const &config : configs) {
+    printf("  %-6s  %-6s  %-6s  %-7s %-9s\n", "size_i", "size_j", "size_k", "speedup", "frac of max");
+    printf("  %-6s  %-6s  %-6s  %-7s %-9s\n", "------", "------", "------", "-------", "----------");
+    for (int i = 0; i < configs.size(); ++i) {
+        auto const &config = configs.at(i);
         auto size_i = config.size_i;
         auto size_j = config.size_j;
         auto size_k = config.size_k;
@@ -988,6 +992,10 @@ void print_speedup(
         } else {
             printf("  %7s", "-");
         }
+
+        printf(" %8.3f\n",
+                fraction_achieved[i]);
+
         printf("\n");
     }
 }
@@ -1024,6 +1032,52 @@ int main(int argc, char **argv) {
     print_speedup(configs, get_cublas_fma_results(), results.at(results.size() - 1));
 
     write_json_results("out/results.json", results);
+    float PEAK_TENSOR_TFLOPS = 53.45;
+
+    printf("\n\n");
+    for (auto const &cfg : configs) {
+        int M = cfg.size_i;
+        int N = cfg.size_j;
+        int K = cfg.size_k;
+
+        float peak_gflops = 26730.0f;
+        float gflops = 2.0f * M * N * K / 1e9f;
+
+        float t_compute_ms_fma = (gflops / peak_gflops) * 1e3f;
+
+        float bytes_needed = (M * K + K * N + M * N) * sizeof(float);
+        float bytes_MB = bytes_needed / 1e6f;
+        float PEAK_BW_GB = 360.0f; // dram
+        float t_memory_ms_fma = (bytes_needed / (PEAK_BW_GB * 1e9f)) * 1e3f;
+
+        float t_lower_ms_fma = std::max(t_compute_ms_fma, t_memory_ms_fma);
+        bool prev_compute_bound = (t_compute_ms_fma >= t_memory_ms_fma);
+
+        float max_tflops_fma = gflops / (t_lower_ms_fma / 1e3f) / 1e3f;
+
+        // tensor core calculations
+        float t_compute_ms = ((gflops * 1e9f) / (PEAK_TENSOR_TFLOPS * 1e12f)) * 1e3f;
+        bool compute_bound = (t_compute_ms >= t_memory_ms_fma);
+        float t_lower_ms = std::max(t_compute_ms, t_memory_ms_fma);
+
+        double max_tflops = (gflops / 1e3) / (t_lower_ms / 1e3);
+
+        // Print results
+        printf("size_i=%4d  size_j=%4d  size_k=%4d\n", M, N, K);
+        printf("  GFLOPs:               %10.3f\n", gflops);
+        printf("  t_compute (ms):       %10.3f\n", t_compute_ms);
+        printf("  Bytes(MB):            %10.3f\n", t_memory_ms_fma);
+        printf("  t_memory(ms):         %10.3f\n", t_lower_ms);
+        printf(
+            "  ?-bound:               %10s\n",
+            compute_bound ? "compute" : "bandwidth");
+        printf(
+            "  (prev) ?-bound:        %10s\n",
+            prev_compute_bound ? "compute" : "bandwidth");
+        printf("  Max TFLOP/s (tc):       %9.3f\n", max_tflops);
+        printf("  Max TFLOP/s (fma):      %9.3f\n", max_tflops_fma);
+        printf("===================================================\n\n");
+    }
 
     return 0;
 }
