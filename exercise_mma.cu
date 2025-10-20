@@ -30,6 +30,71 @@ constexpr int32_t mma_size_k = 8;
 
 __global__ void mma_16x8x8_kernel(float const *a, float const *b, float *c) {
     // TODO: your GPU code here (using inline PTX)
+    // TODO: make generic to mma_size i, j, k
+    int tidx = threadIdx.x;
+    // float c1 = c[tidx * 2];
+    // float c2 = c[tidx * 2 + 1];
+    // float c3 = c[tidx * 2 + 64];
+    // float c4 = c[tidx * 2 + 65];
+
+    int c1_row = tidx / 4;
+    int c1_col = tidx % 4 * 2;
+
+    float c1 = c[c1_row * 8 + c1_col];
+    float c2 = c[c1_row * 8 + c1_col + 1];
+    float c3 = c[(c1_row + 8) * 8 + c1_col];
+    float c4 = c[(c1_row + 8) * 8 + c1_col + 1];
+
+    uint32_t c_reg[4] = {
+        __float_as_uint(c1),
+        __float_as_uint(c2),
+        __float_as_uint(c3),
+        __float_as_uint(c4),
+    };
+
+    // divide A into 4 and give each thread 4 elements
+    int a1_row = tidx / 4;
+    int a1_col = tidx % 4;
+
+    float a1 = a[a1_row * 8 + a1_col];
+    float a2 = a[(a1_row + 8) * 8 + a1_col];
+    float a3 = a[a1_row * 8 + a1_col + 4];
+    float a4 = a[(a1_row + 8) * 8 + a1_col + 4];
+
+    uint32_t a_reg[4] = {
+        __float_as_uint(a1),
+        __float_as_uint(a2),
+        __float_as_uint(a3),
+        __float_as_uint(a4),
+    };
+
+    int b1_col = tidx / 4;
+    int b1_row = tidx % 4;
+
+    float b1 = b[b1_row * 8 + b1_col];
+    float b2 = b[(b1_row + 4) * 8 + b1_col];
+
+    uint32_t b_reg[2] = {
+        __float_as_uint(b1),
+        __float_as_uint(b2),
+    };
+
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
+        "{%0, %1, %2, %3},\n"
+        "{%4, %5, %6, %7},\n"
+        "{%8, %9},\n"
+        "{%0, %1, %2, %3};\n"
+        : "+r"(c_reg[0]), "+r"(c_reg[1]), "+r"(c_reg[2]), "+r"(c_reg[3])
+        : "r"(a_reg[0]), "r"(a_reg[1]), "r"(a_reg[2]), "r"(a_reg[3]),
+        "r"(b_reg[0]), "r"(b_reg[1])
+    );
+
+    c[tidx * 2] = __uint_as_float(c_reg[0]);
+    c[tidx * 2 + 1] = __uint_as_float(c_reg[1]);
+    c[tidx * 2 + 64] = __uint_as_float(c_reg[2]);
+    c[tidx * 2 + 65] = __uint_as_float(c_reg[3]);
+
 }
 
 /// <--- /your code here --->
